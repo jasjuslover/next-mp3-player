@@ -2,7 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { Pause, Play, SkipBack, SkipForward } from "lucide-react";
+import { Pause, Play, SkipBack, SkipForward, Trash2 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -199,6 +199,7 @@ export default function HomePage() {
   const [linkTitle, setLinkTitle] = useState("");
   const [linkUrl, setLinkUrl] = useState("");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
+  const [isLoadingTrack, setIsLoadingTrack] = useState(false);
 
   const currentTrack = playlist[currentIndex];
 
@@ -231,21 +232,31 @@ export default function HomePage() {
 
     const attemptPlayback = async () => {
       try {
+        if (node.readyState < 3) {
+          setIsLoadingTrack(true);
+        }
         await node.play();
         setHint(null);
       } catch {
         setHint("Press play once to allow background audio.");
+        setIsLoadingTrack(false);
       } finally {
         setShouldForcePlay(false);
       }
     };
 
     attemptPlayback();
-  }, [shouldForcePlay, currentTrack]);
+  }, [audioRef, shouldForcePlay, currentTrack]);
 
   useEffect(() => {
     setProgress(0);
   }, [currentTrack?.id]);
+
+  useEffect(() => {
+    if (!currentTrack) {
+      setIsLoadingTrack(false);
+    }
+  }, [currentTrack]);
 
   useEffect(() => {
     if (!playlist.length) {
@@ -253,7 +264,7 @@ export default function HomePage() {
       setIsPlaying(false);
       setProgress(0);
     }
-  }, [playlist.length]);
+  }, [audioRef, playlist.length]);
 
   const handlePlaylistAction = useCallback(
     (mode: "replace" | "append") => {
@@ -269,6 +280,8 @@ export default function HomePage() {
           setCurrentIndex(0);
           setIsPlaying(false);
           setProgress(0);
+          setIsLoadingTrack(false);
+          setShouldForcePlay(false);
         }
         return;
       }
@@ -277,19 +290,27 @@ export default function HomePage() {
       const playlistWithIds = assignRuntimeIds(tracks);
 
       if (mode === "replace") {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        setProgress(0);
+        setIsLoadingTrack(false);
+        setShouldForcePlay(false);
         setPlaylist(playlistWithIds);
         setCurrentIndex(0);
-        setShouldForcePlay(true);
         return;
       }
 
       setPlaylist((prev) => [...prev, ...playlistWithIds]);
       if (!playlist.length) {
+        audioRef.current?.pause();
+        setIsPlaying(false);
+        setIsLoadingTrack(false);
+        setShouldForcePlay(false);
         setCurrentIndex(0);
-        setShouldForcePlay(true);
+        setProgress(0);
       }
     },
-    [rawInput, playlist.length]
+    [audioRef, rawInput, playlist.length]
   );
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -317,13 +338,17 @@ export default function HomePage() {
     setPlaylist((prev) => [...prev, newTrack]);
 
     if (!hadTracks) {
+      audioRef.current?.pause();
       setCurrentIndex(0);
-      setShouldForcePlay(true);
+      setIsPlaying(false);
+      setIsLoadingTrack(false);
+      setShouldForcePlay(false);
+      setProgress(0);
     }
 
     setLinkTitle("");
     setLinkUrl("");
-  }, [linkTitle, linkUrl, playlist.length]);
+  }, [audioRef, linkTitle, linkUrl, playlist.length]);
 
   const handleLinkSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -337,7 +362,55 @@ export default function HomePage() {
     setIsPlaying(false);
     setProgress(0);
     setHint(null);
-  }, []);
+    setIsLoadingTrack(false);
+    setShouldForcePlay(false);
+  }, [audioRef]);
+
+  const handleDeleteTrack = useCallback(
+    (trackId: string) => {
+      const audioNode = audioRef.current;
+      const wasPlaying = !!audioNode && !audioNode.paused;
+
+      setPlaylist((prev) => {
+        const removeIndex = prev.findIndex((track) => track.id === trackId);
+        if (removeIndex === -1) {
+          return prev;
+        }
+
+        const nextPlaylist = prev.filter((track) => track.id !== trackId);
+
+        if (!nextPlaylist.length) {
+          audioNode?.pause();
+          setIsPlaying(false);
+          setProgress(0);
+          setHint(null);
+          setShouldForcePlay(false);
+          setIsLoadingTrack(false);
+          setCurrentIndex(0);
+          return nextPlaylist;
+        }
+
+        setCurrentIndex((current) => {
+          if (removeIndex < current) {
+            return Math.max(0, current - 1);
+          }
+
+          if (removeIndex === current) {
+            const updatedIndex = Math.min(current, nextPlaylist.length - 1);
+            if (wasPlaying) {
+              setShouldForcePlay(true);
+            }
+            return updatedIndex;
+          }
+
+          return current;
+        });
+
+        return nextPlaylist;
+      });
+    },
+    [audioRef]
+  );
 
   const handleTimeUpdate = () => {
     const node = audioRef.current;
@@ -349,25 +422,34 @@ export default function HomePage() {
     setProgress((node.currentTime / node.duration) * 100);
   };
 
-  const playNext = useCallback(() => {
-    setCurrentIndex((index) => {
-      if (index + 1 >= playlist.length) {
-        setIsPlaying(false);
-        return index;
-      }
+  const playNext = useCallback(
+    (shouldResumePlayback = false) => {
+      setCurrentIndex((index) => {
+        if (index + 1 >= playlist.length) {
+          setIsPlaying(false);
+          return index;
+        }
 
-      setShouldForcePlay(true);
-      return index + 1;
-    });
-  }, [playlist.length]);
+        if (shouldResumePlayback) {
+          setShouldForcePlay(true);
+        }
 
-  const playPrevious = useCallback(() => {
+        return index + 1;
+      });
+    },
+    [playlist.length]
+  );
+
+  const playPrevious = useCallback((shouldResumePlayback = false) => {
     setCurrentIndex((index) => {
       if (index === 0) {
         return index;
       }
 
-      setShouldForcePlay(true);
+      if (shouldResumePlayback) {
+        setShouldForcePlay(true);
+      }
+
       return index - 1;
     });
   }, []);
@@ -379,12 +461,19 @@ export default function HomePage() {
     }
 
     if (node.paused) {
+      if (node.readyState < 3) {
+        setIsLoadingTrack(true);
+      }
       node
         .play()
         .then(() => setHint(null))
-        .catch(() => setHint("Interaction required to resume playback."));
+        .catch(() => {
+          setHint("Interaction required to resume playback.");
+          setIsLoadingTrack(false);
+        });
     } else {
       node.pause();
+      setIsLoadingTrack(false);
     }
   };
 
@@ -583,7 +672,10 @@ export default function HomePage() {
               <div className="grid gap-3 sm:grid-cols-3">
                 <Button
                   variant="outline"
-                  onClick={playPrevious}
+                  onClick={() => {
+                    const shouldResume = !!audioRef.current && !audioRef.current.paused;
+                    playPrevious(shouldResume);
+                  }}
                   disabled={!playlist.length || currentIndex === 0}
                   aria-label="Previous track"
                 >
@@ -596,7 +688,10 @@ export default function HomePage() {
                 </Button>
                 <Button
                   variant="outline"
-                  onClick={playNext}
+                  onClick={() => {
+                    const shouldResume = !!audioRef.current && !audioRef.current.paused;
+                    playNext(shouldResume);
+                  }}
                   disabled={!playlist.length || currentIndex + 1 >= playlist.length}
                   aria-label="Next track"
                 >
@@ -604,6 +699,9 @@ export default function HomePage() {
                   <span className="sr-only">Next</span>
                 </Button>
               </div>
+              {isLoadingTrack && currentTrack && (
+                <p className="text-sm text-white/80">Loading "{currentTrack.title}"...</p>
+              )}
               {hint && <p className="text-sm text-amber-200/90">{hint}</p>}
             </CardContent>
           </Card>
@@ -640,28 +738,42 @@ export default function HomePage() {
               <ol className="space-y-3">
                 {playlist.map((track, index) => (
                   <li key={track.id}>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      className={cn(
-                        "w-full justify-between rounded-2xl border border-white/10 px-4 py-3 text-left text-base font-semibold",
-                        index === currentIndex
-                          ? "border-emerald-300/60 bg-emerald-400/10 text-white"
-                          : "text-white/80 hover:border-white/30"
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        className={cn(
+                          "flex-1 justify-between rounded-2xl border border-white/10 px-4 py-3 text-left text-base font-semibold",
+                          index === currentIndex
+                            ? "border-emerald-300/60 bg-emerald-400/10 text-white"
+                            : "text-white/80 hover:border-white/30"
                       )}
                       onClick={() => {
+                        const shouldResume = !!audioRef.current && !audioRef.current.paused;
                         setCurrentIndex(index);
-                        setShouldForcePlay(true);
+                        if (shouldResume) {
+                          setShouldForcePlay(true);
+                        }
                       }}
                     >
-                      <span className="flex flex-col text-left">
-                        <span>{track.title}</span>
-                        <span className="text-sm font-normal text-white/60">{track.artist ?? "Unknown artist"}</span>
-                      </span>
-                      <span className="text-sm text-white/70">
-                        {index === currentIndex && playlist.length ? "Now" : index + 1}
-                      </span>
-                    </Button>
+                        <span className="flex flex-col text-left">
+                          <span>{track.title}</span>
+                          <span className="text-sm font-normal text-white/60">{track.artist ?? "Unknown artist"}</span>
+                        </span>
+                        <span className="text-sm text-white/70">
+                          {index === currentIndex && playlist.length ? "Now" : index + 1}
+                        </span>
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        aria-label={`Remove ${track.title}`}
+                        className="rounded-2xl border border-white/10 px-3 text-white/70 hover:border-rose-400/40 hover:bg-rose-400/10 hover:text-white"
+                        onClick={() => handleDeleteTrack(track.id)}
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </Button>
+                    </div>
                   </li>
                 ))}
               </ol>
@@ -694,10 +806,22 @@ export default function HomePage() {
         ref={audioRef}
         className="hidden"
         src={currentTrack?.streamUrl ?? undefined}
-        onEnded={playNext}
+        onEnded={() => playNext(true)}
         onPlay={() => setIsPlaying(true)}
-        onPause={() => setIsPlaying(false)}
+        onPause={() => {
+          setIsPlaying(false);
+          setIsLoadingTrack(false);
+        }}
         onTimeUpdate={handleTimeUpdate}
+        onLoadStart={() => setIsLoadingTrack(true)}
+        onCanPlay={() => setIsLoadingTrack(false)}
+        onPlaying={() => setIsLoadingTrack(false)}
+        onWaiting={() => setIsLoadingTrack(true)}
+        onStalled={() => setIsLoadingTrack(true)}
+        onError={() => {
+          setIsLoadingTrack(false);
+          setHint("Unable to load this stream. Please try again.");
+        }}
         preload="none"
       />
     </main>
